@@ -19,6 +19,8 @@ class Account:
         self.unrealizedPnL: Dict[float, float] = {}
         self.holdings: Dict[float, Holding] = init_holdings
         self.ContractSize = pd.read_csv(CONTRACTLIST, index_col=0)['ContractSize']
+        self.Turnover: float = 0
+        self.n_trade: int = 0
 
     def __get_contracts(self)->List[float]:
         return self.holdings.keys()
@@ -37,6 +39,8 @@ class Account:
         self.cash = self.cash - msg.CommissionFee
         holding_contracts = self.__get_contracts()
         ContractId = msg.ContractId
+        self.Turnover += abs(msg.FillPrice * msg.FillQuantity * self.ContractSize[ContractId])
+        self.n_trade += 1
         if not ContractId in holding_contracts:
             new_holding = Holding(Quantity=msg.FillQuantity, Last_Settle_Price=msg.FillPrice,
                                   FillPrice=msg.FillPrice, FillTimeStamp=msg.TimeStamp, ContractId=ContractId)

@@ -45,23 +45,23 @@ class Simulator:
         if not pending_order:
             return
         Filled_Order = None
-        if pending_order.Direction == BUYSELLDIRECTION.BUY and pending_order.SendPrice >= msg.Ask:
+        if pending_order.Direction == BUYSELLDIRECTION.BUY:# and pending_order.SendPrice >= msg.Ask:
             Filled_Order = OrderCallback(nonce=pending_order.nonce, 
                                          status=ORDERSTATUS.FILLED, 
                                          TimeStamp=msg.ExchDateTime,
                                          ContractId = ContractId, 
                                          FillQuantity = pending_order.SendQuantity,
-                                         FillPrice=msg.Ask, 
+                                         FillPrice = pending_order.SendPrice, 
                                          Direction=pending_order.Direction, 
                                          CommissionFee=0)
             self.pending_orders.pop(ContractId)
-        if pending_order.Direction == BUYSELLDIRECTION.SELL and pending_order.SendPrice <= msg.Bid:
+        if  pending_order.Direction == BUYSELLDIRECTION.SELL:# and pending_order.SendPrice <= msg.Bid:
             Filled_Order = OrderCallback(nonce=pending_order.nonce, 
                                          status=ORDERSTATUS.FILLED, 
                                          TimeStamp=msg.ExchDateTime,
                                          ContractId = ContractId, 
                                          FillQuantity = pending_order.SendQuantity,
-                                         FillPrice=msg.Bid, 
+                                         FillPrice = pending_order.SendPrice, 
                                          Direction=pending_order.Direction, 
                                          CommissionFee=0)
             self.pending_orders.pop(ContractId)
@@ -81,8 +81,11 @@ class Simulator:
 
     
     def cancel_order(self, ContractId: float):
-        assert ContractId in self.pending_orders, f'Can not cancel order of {ContractId} as it not exists!'
-        self.pending_orders.pop(ContractId)
+        try:
+            order = self.pending_orders.pop(ContractId)
+            return order
+        except:
+            self.log.warning('Cancel order failed!')
         return
 
 

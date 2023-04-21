@@ -18,7 +18,7 @@ def _timestamp2datetime(timestamp: int) -> pd.Timestamp:
     dt =  datetime.datetime(1, 1, 1) + datetime.timedelta(seconds=timestamp/10000000)
     return pd.Timestamp(dt)
 
-class Streaming_data_generator:
+class STEAMINGDATAGENERATOR:
     def __init__(self, date: pd.Timestamp, contracts: List[float]):
         self._date = date
         self.q = deque()
@@ -53,7 +53,3 @@ class Streaming_data_generator:
             self.q.append(msg)
         else:
             raise ValueError('put message method can only be left or right')
-
-if __name__ == "__main__":
-    sdg = Streaming_data_generator(pd.to_datetime('2020-07-20'), contracts=[852010.0])
-    print('Done!')
