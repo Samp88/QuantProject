@@ -71,6 +71,7 @@ class Strategy:
         if RESULT_ROOT.joinpath(f'{account_name}_{last_date.strftime("%Y-%m-%d")}.pickle').exists():
             with open(RESULT_ROOT.joinpath(f'{account_name}_{last_date.strftime("%Y-%m-%d")}.pickle'), "rb") as f:
                 account: Account = pickle.load(f)
+                account.transation_record = []
         else:
             account = Account(name=account_name,
                               init_pv=10000000, init_holdings={})

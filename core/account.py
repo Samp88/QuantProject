@@ -21,6 +21,7 @@ class Account:
         self.ContractSize = pd.read_csv(CONTRACTLIST, index_col=0)['ContractSize']
         self.Turnover: float = 0
         self.n_trade: int = 0
+        self.transation_record: List[OrderCallback] = [] 
 
     def __get_contracts(self)->List[float]:
         return self.holdings.keys()
@@ -41,6 +42,7 @@ class Account:
         ContractId = msg.ContractId
         self.Turnover += abs(msg.FillPrice * msg.FillQuantity * self.ContractSize[ContractId])
         self.n_trade += 1
+        self.transation_record.append(msg)
         if not ContractId in holding_contracts:
             new_holding = Holding(Quantity=msg.FillQuantity, Last_Settle_Price=msg.FillPrice,
                                   FillPrice=msg.FillPrice, FillTimeStamp=msg.TimeStamp, ContractId=ContractId)
