@@ -2,6 +2,7 @@ import pathlib
 import pickle
 import sys
 from typing import Dict, List
+from collections import defaultdict
 
 path = pathlib.Path(__file__).parent.parent
 sys.path.append(str(path))
@@ -17,35 +18,73 @@ from utilities.constant import (BUYSELLDIRECTION, Holding, Order,
 from utilities.envs import RESULT_ROOT
 from utilities.logger import get_logger
 from utilities.read_data import load_data
-from utilities.tradedate import offset_trading_day
+from utilities.tradedate import offset_trading_day, calendar
 
 
 class Strategy:
     def __init__(self, date: pd.Timestamp, contracts: List[float], log_level: str = 'INFO', **kwarg):
+        # TODO: some hard code should be set as parameter
         self._n = 0
         self._date = date
         # local time when reciving a snapshot data
-        self.current_time: pd.Timestamp = None
+        self.current_time: pd.Timestamp = pd.to_datetime('1970-01-01')
         # seconds, from exchage time, start to count at 00:00:00
         self.current_exchtime_sec: int = 9*3600
         self.last_min_sec: int = 9*3600  # last time to enter a new minute.
+        # last time to enter a signal calculation.
         self._last_sig_sec: int = 9*3600
         self.contracts = contracts
         self.min_data_list = {contract: pd.DataFrame(
-            columns=['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'ABV_Diff','ZT']) for contract in contracts}
+            columns=['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'ABV_Diff', 'ZT']) for contract in contracts}
         self._cached_tickes = {contract: [] for contract in contracts}
         self.action_map = {}
         self.LastPrices = {}
         self.LastTicks: Dict[float, TickData] = {}
         self.pending_orders = {}
-        self.factors: Dict[float, pd.DataFrame] = {}
-        self.send_order_flag = False
-        self.last_target_position: Dict[float, int] = {}
+        self.factors: Dict[float, pd.DataFrame] = {contract: pd.DataFrame(
+            columns=['Momt5', 'rwR5', 'ABV_Diff']) for contract in self.contracts}
+        self._signal: Dict[float, pd.DataFrame] = {contract: pd.DataFrame(
+            columns=['combine']) for contract in self.contracts}
+        self.send_order_flag = False  # 是否需要交易
+        self.last_target_position: Dict[float, int] = {}  # 需要交易的时候发单的目标持仓
         self.log = get_logger(module_name=__name__,
                               filename=f'strategy_{self.contracts[0]}',
                               user_timefunction=self.current_strftime,
                               level=log_level)
         self.__init_account('Test')
+        self.__load_history_data()
+
+    def __init_account(self, account_name: str):
+        '''
+        set up an account for strategy. if last trade date account info (only save after market close) is found, 
+        load the account info directly 
+        '''
+        last_date = offset_trading_day(self._date, -1)
+        if RESULT_ROOT.joinpath(f'{account_name}_{last_date.strftime("%Y-%m-%d")}.pickle').exists():
+            with open(RESULT_ROOT.joinpath(f'{account_name}_{last_date.strftime("%Y-%m-%d")}.pickle'), "rb") as f:
+                account: Account = pickle.load(f)
+        else:
+            account = Account(name=account_name,
+                              init_pv=10000000, init_holdings={})
+        self.account = account
+
+    def __load_history_data(self):
+        # load history factor...
+        self.history_factor = defaultdict()
+        current_date = self._date
+        start_date = pd.to_datetime('2020-07-20')
+        _tmp_list = []
+        for ContractId in self.contracts:
+            for date in calendar.loc[start_date: offset_trading_day(current_date, -1)].index:
+                try:
+                    _tmp_list.append(pd.read_csv(RESULT_ROOT.joinpath(
+                        f'factors/{date.strftime("%Y-%m-%d")}').joinpath(f'{ContractId}.csv'), index_col=0))
+                except:
+                    self.log.warning(
+                        f'Cannot find {ContractId} history factor in {date}!')
+            if len(_tmp_list):
+                self.history_factor[ContractId] = pd.concat(_tmp_list)
+        return
 
     def current_strftime(self):
         return self.current_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -59,16 +98,6 @@ class Strategy:
         self.current_exchtime_sec = time_sec
         return
 
-    def __init_account(self, account_name: str):
-        last_date = offset_trading_day(self._date, -1)
-        if RESULT_ROOT.joinpath(f'{account_name}_{last_date.strftime("%Y-%m-%d")}.pickle').exists():
-            with open(RESULT_ROOT.joinpath(f'{account_name}_{last_date.strftime("%Y-%m-%d")}.pickle'), "rb") as f:
-                account: Account = pickle.load(f)
-        else:
-            account = Account(name=account_name,
-                              init_pv=10000000, init_holdings={})
-        self.account = account
-
     def __update_lasttick(self, data: TickData):
         contractID = data.ContractId
         self.LastTicks[contractID] = data
@@ -76,6 +105,9 @@ class Strategy:
         return
 
     def on_msg(self, msg):
+        '''
+        策略每收到一条消息的处理逻辑， 回测框架的消息目前只有 tick data 和 order callback
+        '''
         self.send_order_flag = False
         if msg is not None:
             if isinstance(msg, dict):  # 行情通用格式
@@ -91,9 +123,12 @@ class Strategy:
         return
 
     def on_tickdata(self, msg: TickData):
+        '''
+        策略每收到一条tick 数据的处理逻辑
+        '''
         self._n += 1
         if self._n % 10000 == 0:
-            self.log.info('Logging')
+            self.log.info(f'Logging {self._n}')
         self.__update_time(msg)
         self.__update_lasttick(msg)
         if (self.current_exchtime_sec - self.last_min_sec >= 60) and (self.last_min_sec not in [36900, 41400]):
@@ -103,9 +138,10 @@ class Strategy:
             self.log.info(self.account.assetvalue)
             self.__cal_factors()
         
+        # TODO. 信号计算的时间可以设置成参数。 和因子计算的时间不同是为了看平仓的信号。
         if self.current_exchtime_sec - self._last_sig_sec >= 10:
-           self.cal_target_position()
-        
+            self.cal_target_position()
+
         self.last_min_sec = max(
             (self.current_exchtime_sec // 60) * 60, self.last_min_sec)
         self._cached_tickes[msg.ContractId].append(msg)
@@ -124,24 +160,48 @@ class Strategy:
         for ContractId in self.contracts:
             min_data = self.min_data_list[ContractId]
             min_close = min_data['Close']
-            factor_MOMT_5M = ((min_close-min_close.shift(5))/min_close.shift(5)).to_frame('Momt5')
-            factor_rwR = ((min_data['Close'] - min_data['Open'].shift(4))/(min_data['High'].rolling(5).max() - min_data['Low'].rolling(5).min())).to_frame('rwR5')
-            self.factors[ContractId] = pd.concat([factor_MOMT_5M, factor_rwR], axis=1)
+            factor_MOMT_5M = ((min_close-min_close.shift(5)) /
+                              min_close.shift(5)).to_frame('Momt5')
+            RTN = min_data['Close'] - min_data['Open'].shift(4)
+            ATR = min_data['High'].rolling(
+                5).max() - min_data['Low'].rolling(5).min()
+            factor_rwR = RTN.div(ATR.where(ATR != 0, np.nan)).to_frame('rwR5')
+            factor_Neg_ABV_Diff = min_data['ABV_Diff']
+            self.factors[ContractId] = pd.concat(
+                [factor_MOMT_5M, factor_rwR, factor_Neg_ABV_Diff], axis=1)
 
     def cal_target_position(self):
+        '''
+        1. 开盘五分钟不做，收盘后五分钟平仓。
+        2. 没有持仓时根据信号方向交易， 交易量为账户的 asset_value / 一共交易的品种数
+        3. 有持仓时， 1) pnl < -0.003 止损平仓， 2) 持仓时间超过290s 平仓 3) 来了个反向信号平仓
+        '''
         self.log.debug('In signal caculation!')
         self._last_sig_sec = (self.current_exchtime_sec) // 10 * 10
         target_position = {}
         for ContractId in self.contracts:
             current_holding = self.account.holdings.get(ContractId, None)
-            if self.current_exchtime_sec > 14*3600+55*60 or self.current_exchtime_sec < 9*3600+5*60: 
+            # Cal Signal, two factor linear combination
+            # TODO: 这一部分可以放在外面, 为了更灵活的添加更多因子， 或者使用新的合成方法
+            _history_factor = self.history_factor[ContractId]
+            current_factor = self.factors[ContractId]
+            _all_factor = pd.concat([_history_factor, current_factor])
+            _all_factor = (_all_factor-_all_factor.mean())/_all_factor.std()
+            _agg_factor = _all_factor['rwR5'] - _all_factor['ABV_Diff']
+            self._signal[ContractId].loc[self.last_min_sec,
+                                         'combine'] = _agg_factor.iloc[-1]
+            signal = _agg_factor.fillna(0).iloc[-1]
+            if signal < 0*_agg_factor.std() and signal > 0 * -_agg_factor.std():
+                signal = 0
+            signal = np.sign(signal)
+
+            if self.current_exchtime_sec > 14*3600+55*60 or self.current_exchtime_sec < 9*3600+5*60:
                 if current_holding:
                     target_position[ContractId] = 0
                     self.send_order_flag = True
                 else:
                     return
-            signal = np.sign(self.factors[ContractId].fillna(
-                0)).iloc[-1]['rwR5']
+
             if not current_holding:
                 if signal != 0:
                     target_position[ContractId] = - signal * round(self.account.assetvalue / len(
@@ -152,16 +212,19 @@ class Strategy:
                 Filled_time_sec = Filled_time.hour * 3600 + \
                     Filled_time.minute*60 + Filled_time.second
                 Filled_Price = current_holding.FillPrice
-                if self.current_exchtime_sec - Filled_time_sec > 295:
+                if self.current_exchtime_sec - Filled_time_sec >= 290:
                     target_position[ContractId] = 0
                     self.send_order_flag = True
-                
+                #if np.sign(current_holding.Quantity) == signal:
+                #    target_position[ContractId] = 0
+                #    self.send_order_flag = True
+
                 # if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price > 0.002:
                 #    self.log.info('Send stop profit task')
                 #    target_position[ContractId] = 0
                 #    self.send_order_flag = True
-                
-                #if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price < -0.001:
+
+                #if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price < -0.003:
                 #    self.log.info('Send stop loss task')
                 #    target_position[ContractId] = 0
                 #    self.send_order_flag = True
@@ -205,7 +268,8 @@ class Strategy:
             # send2simulator
             pending_orders = self.pending_orders.get(ContractId, None)
             if pending_orders:
-                cancelled_order = self.cancel_order(ContractId, target_simulator)
+                cancelled_order = self.cancel_order(
+                    ContractId, target_simulator)
                 if not cancelled_order:
                     return
             target_simulator.pending_order(one_order)
@@ -240,7 +304,8 @@ class Strategy:
                 # incase restart the process
                 unfinshed_kbar = self.min_data_list[ContractId].loc[self.last_min_sec]
             else:
-                unfinshed_kbar = pd.Series(np.nan, index=['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'ABV_Diff', 'ZT'])
+                unfinshed_kbar = pd.Series(np.nan, index=[
+                                           'Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'ABV_Diff', 'ZT'])
             unfinshed_kbar.loc['Date'] = self.current_time.strftime('%Y-%m-%d')
             hour = (self.last_min_sec // 3600)
             minute = (self.last_min_sec % 3600) // 60
@@ -256,7 +321,7 @@ class Strategy:
                 [tick.LastVol for tick in ticks])
             unfinshed_kbar.loc['Amount'] = np.sum(
                 [tick.LastVol * tick.AveragePrice * self.account.ContractSize.loc[ContractId] for tick in ticks])
-            
+
             # netinflow
             # v = np.array([tick.LastVol for tick in ticks])
             a = np.array([tick.Ask for tick in ticks])
@@ -267,7 +332,7 @@ class Strategy:
             # x = (avg - b) / (a - b)
             # netinflow_volume = x * v - (1-x) * v
             # unfinshed_kbar.loc['Netinflow_Volume'] = np.round(np.nansum(netinflow_volume), 4)
-            
+
             # 挂单量差值的1min积累 买单挂单量-卖单挂单量
             av = np.array([tick.AskVol for tick in ticks])
             bv = np.array([tick.BidVol for tick in ticks])
@@ -299,6 +364,8 @@ class Strategy:
             Strategy level error handling, including saving things, etc
         """
         self.account.settle(LastPrices=self.LastPrices)
+        self.log.info(
+            f'On exit, n = {self.account.n_trade}, turnover = {self.account.Turnover}')
         with open(RESULT_ROOT.joinpath(f'{self.account.AccountName}_{self._date.strftime("%Y-%m-%d")}.pickle'), "wb") as f:
             pickle.dump(self.account, f)
         mindata_savepath = RESULT_ROOT.joinpath(
@@ -308,14 +375,26 @@ class Strategy:
         for ContractId in self.contracts:
             self.min_data_list[ContractId].to_csv(
                 mindata_savepath.joinpath(f'{int(ContractId)}.csv'))
-            
+
+        # save factor in each trade day end.
         factor_savepath = RESULT_ROOT.joinpath(
             f'factors/{self._date.strftime("%Y-%m-%d")}')
         if not factor_savepath.exists():
             factor_savepath.mkdir(parents=True)
         for ContractId in self.contracts:
-            self.factors[ContractId].to_csv(
+            factor2save = self.factors[ContractId]
+            factor2save.to_csv(
                 factor_savepath.joinpath(f'{int(ContractId)}.csv'))
+
+        # save signal
+        signal_savepath = RESULT_ROOT.joinpath(
+            f'signals/{self._date.strftime("%Y-%m-%d")}')
+        if not signal_savepath.exists():
+            signal_savepath.mkdir(parents=True)
+        for ContractId in self.contracts:
+            self._signal[ContractId].to_csv(
+                signal_savepath.joinpath(f'{int(ContractId)}.csv'))
+
         if not e:
             self.log.debug('Finished!')
         return
@@ -323,14 +402,14 @@ class Strategy:
 
 
 if __name__ == '__main__':
-    dates = ['2020-07-20', '2020-07-21', '2020-07-22', '2020-07-23', '2020-07-24', 
-            '2020-07-27', '2020-07-28', '2020-07-29', '2020-07-30', '2020-07-31']
+    dates = ['2020-07-21', '2020-07-22', '2020-07-23', '2020-07-24',
+             '2020-07-27', '2020-07-28', '2020-07-29', '2020-07-30', '2020-07-31']
     for _date in dates:
         date = pd.to_datetime(_date)
         data = load_data(path.joinpath(
             f'data/MD_with_signal_{date.strftime("%Y%m%d")}.hdf5'))
-        # contracts = [322009, 672009, 262010, 142009, 702012, 242009, 842009, 362009, 802009, 332009, 152012, 872010, 
-        #             682009, 772009, 792009, 382009, 762011, 302009, 372009, 352009, 882009, 652009, 222009, 502009, 
+        #contracts = [322009, 672009, 262010, 142009, 702012, 242009, 842009, 362009, 802009, 332009, 152012, 872010,
+        #             682009, 772009, 792009, 382009, 762011, 302009, 372009, 352009, 882009, 652009, 222009, 502009,
         #             342009, 232009, 422009, 452009, 212010, 462009, 312009, 192009]
         contracts = [192009]
         print('Loading Strats')
