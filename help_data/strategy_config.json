@@ -1,0 +1,12 @@
+{
+    "factor_param":{
+        "rwR_n": 5
+    },
+    "startegy_param":{
+        "order_style": "Aggresive",
+        "n_seconds2signal": 10,
+        "thresholds": 0,
+        "max_holding_sec": 290,
+        "stoploss": -100
+    }
+}

@@ -1,7 +1,8 @@
+import json
 import pathlib
 import pickle
 import sys
-from typing import Dict, List
+from typing import Dict, List, Union
 from collections import defaultdict
 
 path = pathlib.Path(__file__).parent.parent
@@ -22,7 +23,12 @@ from utilities.tradedate import offset_trading_day, calendar
 
 
 class Strategy:
-    def __init__(self, date: pd.Timestamp, contracts: List[float], log_level: str = 'INFO', **kwarg):
+    def __init__(self, 
+                 date: pd.Timestamp, 
+                 contracts: List[float],
+                 config_file: Union[pathlib.Path, str],
+                 log_level: str = 'INFO', 
+                 **kwarg):
         # TODO: some hard code should be set as parameter
         self._n = 0
         self._date = date
@@ -47,11 +53,13 @@ class Strategy:
             columns=['combine']) for contract in self.contracts}
         self.send_order_flag = False  # 是否需要交易
         self.last_target_position: Dict[float, int] = {}  # 需要交易的时候发单的目标持仓
+        self.asset_value:pd.Series = pd.Series(name='asset_value')
         self.log = get_logger(module_name=__name__,
                               filename=f'strategy_{self.contracts[0]}',
                               user_timefunction=self.current_strftime,
                               level=log_level)
-        self.__init_account('Test')
+        self.__load_params(config_file)
+        self.__init_account(f'Account_{self.contracts[0]}')
         self.__load_history_data()
 
     def __init_account(self, account_name: str):
@@ -85,6 +93,14 @@ class Strategy:
             if len(_tmp_list):
                 self.history_factor[ContractId] = pd.concat(_tmp_list)
         return
+
+    def __load_params(self, config_file: Union[pathlib.Path, str]):
+        try:
+            with open(config_file, 'rb') as f:
+                params = json.load(f)
+            self.paramters = params
+        except FileNotFoundError as e:
+            raise e        
 
     def current_strftime(self):
         return self.current_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -135,11 +151,11 @@ class Strategy:
             for ContractId in self.contracts:
                 self.__update_min_data(ContractId)
             self.account.update_pv_info(self.LastPrices)
-            self.log.info(self.account.assetvalue)
+            self.asset_value.loc[self.last_min_sec] = self.account.assetvalue
             self.__cal_factors()
         
         # TODO. 信号计算的时间可以设置成参数。 和因子计算的时间不同是为了看平仓的信号。
-        if self.current_exchtime_sec - self._last_sig_sec >= 10:
+        if self.current_exchtime_sec - self._last_sig_sec >= self.paramters['startegy_param']['n_seconds2signal']:
             self.cal_target_position()
 
         self.last_min_sec = max(
@@ -157,14 +173,18 @@ class Strategy:
         return
 
     def __cal_factors(self):
+        factor_params = self.paramters['factor_param']
         for ContractId in self.contracts:
+            # MomT
             min_data = self.min_data_list[ContractId]
             min_close = min_data['Close']
             factor_MOMT_5M = ((min_close-min_close.shift(5)) /
                               min_close.shift(5)).to_frame('Momt5')
-            RTN = min_data['Close'] - min_data['Open'].shift(4)
+            # rwR n_min
+            n = factor_params['rwR_n']
+            RTN = min_data['Close'] - min_data['Open'].shift(n-1)
             ATR = min_data['High'].rolling(
-                5).max() - min_data['Low'].rolling(5).min()
+                n).max() - min_data['Low'].rolling(n).min()
             factor_rwR = RTN.div(ATR.where(ATR != 0, np.nan)).to_frame('rwR5')
             factor_Neg_ABV_Diff = min_data['ABV_Diff']
             self.factors[ContractId] = pd.concat(
@@ -191,8 +211,10 @@ class Strategy:
             self._signal[ContractId].loc[self.last_min_sec,
                                          'combine'] = _agg_factor.iloc[-1]
             signal = _agg_factor.fillna(0).iloc[-1]
-            if signal < 0*_agg_factor.std() and signal > 0 * -_agg_factor.std():
+            threshold = self.paramters['startegy_param']['thresholds']
+            if signal < threshold *_agg_factor.std() and signal > threshold * -_agg_factor.std():
                 signal = 0
+            
             signal = np.sign(signal)
 
             if self.current_exchtime_sec > 14*3600+55*60 or self.current_exchtime_sec < 9*3600+5*60:
@@ -212,7 +234,7 @@ class Strategy:
                 Filled_time_sec = Filled_time.hour * 3600 + \
                     Filled_time.minute*60 + Filled_time.second
                 Filled_Price = current_holding.FillPrice
-                if self.current_exchtime_sec - Filled_time_sec >= 290:
+                if self.current_exchtime_sec - Filled_time_sec >= self.paramters['startegy_param']['max_holding_sec']:
                     target_position[ContractId] = 0
                     self.send_order_flag = True
                 #if np.sign(current_holding.Quantity) == signal:
@@ -224,10 +246,10 @@ class Strategy:
                 #    target_position[ContractId] = 0
                 #    self.send_order_flag = True
 
-                #if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price < -0.003:
-                #    self.log.info('Send stop loss task')
-                #    target_position[ContractId] = 0
-                #    self.send_order_flag = True
+                if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price < self.paramters['startegy_param']['stoploss']:
+                    self.log.info('Send stop loss task')
+                    target_position[ContractId] = 0
+                    self.send_order_flag = True
 
         self.last_target_position = target_position
         return
@@ -394,6 +416,14 @@ class Strategy:
         for ContractId in self.contracts:
             self._signal[ContractId].to_csv(
                 signal_savepath.joinpath(f'{int(ContractId)}.csv'))
+            
+        # save assetvalue
+        assetvalue_savepath = RESULT_ROOT.joinpath(
+            f'assetvalue/{self._date.strftime("%Y-%m-%d")}')
+        if not assetvalue_savepath.exists():
+            assetvalue_savepath.mkdir(parents=True)
+        self.asset_value.to_csv(
+            assetvalue_savepath.joinpath(f'{self.account.AccountName}.csv'))
 
         if not e:
             self.log.debug('Finished!')
