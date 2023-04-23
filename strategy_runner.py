@@ -28,13 +28,12 @@ def strategy_runner(contract: float, config_file: Union[pathlib.Path, str]):
                     sdg.putMsg(order_callback, method='left')
                 strat.on_msg(msg)
                 if strat.send_order_flag and not strat.stop_loss_tag:
-                    strat.sendorder2simulator(simulator, 'aggressive')
+                    strat.sendorder2simulator(simulator, 'conservative')
                 if strat.send_order_flag and strat.stop_loss_tag:
                     strat.sendorder2simulator(simulator, 'aggressive')
     return
 
 if __name__ == "__main__":
     config_file = HELPDATA.joinpath('strategy_config.json')
-    #for contract in [672009, 192009, 242009, 232009, 342009, 772009, 802009, 302009, 702012, 222009, 322009]:
-    for contract in [672009]:
+    for contract in [192009, 342009, 772009, 702012]: # TODO: 考虑设计多进程，首先要解决数据多次读写的问题
         strategy_runner(contract, config_file)

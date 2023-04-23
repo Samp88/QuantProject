@@ -45,23 +45,23 @@ class Simulator:
         if not pending_order:
             return
         Filled_Order = None
-        if pending_order.Direction == BUYSELLDIRECTION.BUY:# and pending_order.SendPrice >= msg.Ask:
+        if pending_order.Direction == BUYSELLDIRECTION.BUY and pending_order.SendPrice >= msg.Ask:
             Filled_Order = OrderCallback(nonce=pending_order.nonce, 
                                          status=ORDERSTATUS.FILLED, 
                                          TimeStamp=msg.ExchDateTime,
                                          ContractId = ContractId, 
                                          FillQuantity = pending_order.SendQuantity,
-                                         FillPrice = pending_order.SendPrice, 
+                                         FillPrice = msg.Ask, 
                                          Direction=pending_order.Direction, 
                                          CommissionFee=0)
             self.pending_orders.pop(ContractId)
-        if  pending_order.Direction == BUYSELLDIRECTION.SELL:# and pending_order.SendPrice <= msg.Bid:
+        if  pending_order.Direction == BUYSELLDIRECTION.SELL and pending_order.SendPrice <= msg.Bid:
             Filled_Order = OrderCallback(nonce=pending_order.nonce, 
                                          status=ORDERSTATUS.FILLED, 
                                          TimeStamp=msg.ExchDateTime,
                                          ContractId = ContractId, 
                                          FillQuantity = pending_order.SendQuantity,
-                                         FillPrice = pending_order.SendPrice, 
+                                         FillPrice = msg.Bid, 
                                          Direction=pending_order.Direction, 
                                          CommissionFee=0)
             self.pending_orders.pop(ContractId)

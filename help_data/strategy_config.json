@@ -5,7 +5,7 @@
     "startegy_param":{
         "order_style": "Aggresive",
         "n_seconds2signal": 5,
-        "thresholds": 0.0,
+        "thresholds": 1.5,
         "max_holding_sec": 295,
         "stoploss": -100
         }
