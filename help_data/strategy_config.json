@@ -4,9 +4,9 @@
     },
     "startegy_param":{
         "order_style": "Aggresive",
-        "n_seconds2signal": 10,
-        "thresholds": 0,
-        "max_holding_sec": 290,
+        "n_seconds2signal": 5,
+        "thresholds": 0.0,
+        "max_holding_sec": 295,
         "stoploss": -100
-    }
+        }
 }

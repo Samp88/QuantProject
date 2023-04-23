@@ -27,10 +27,14 @@ def strategy_runner(contract: float, config_file: Union[pathlib.Path, str]):
                 if order_callback:
                     sdg.putMsg(order_callback, method='left')
                 strat.on_msg(msg)
-                if strat.send_order_flag:
-                    strat.sendorder2simulator(simulator)
+                if strat.send_order_flag and not strat.stop_loss_tag:
+                    strat.sendorder2simulator(simulator, 'aggressive')
+                if strat.send_order_flag and strat.stop_loss_tag:
+                    strat.sendorder2simulator(simulator, 'aggressive')
     return
 
 if __name__ == "__main__":
     config_file = HELPDATA.joinpath('strategy_config.json')
-    strategy_runner(192009, config_file)
+    #for contract in [672009, 192009, 242009, 232009, 342009, 772009, 802009, 302009, 702012, 222009, 322009]:
+    for contract in [672009]:
+        strategy_runner(contract, config_file)

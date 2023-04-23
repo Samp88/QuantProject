@@ -40,6 +40,7 @@ class Strategy:
         # last time to enter a signal calculation.
         self._last_sig_sec: int = 9*3600
         self.contracts = contracts
+        self._last_stoploss_time_sec: Dict[int] = {k: 9*3600 for k in self.contracts}
         self.min_data_list = {contract: pd.DataFrame(
             columns=['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Amount', 'ABV_Diff', 'ZT']) for contract in contracts}
         self._cached_tickes = {contract: [] for contract in contracts}
@@ -52,6 +53,7 @@ class Strategy:
         self._signal: Dict[float, pd.DataFrame] = {contract: pd.DataFrame(
             columns=['combine']) for contract in self.contracts}
         self.send_order_flag = False  # 是否需要交易
+        self.stop_loss_tag = False # 是否止损单
         self.last_target_position: Dict[float, int] = {}  # 需要交易的时候发单的目标持仓
         self.asset_value:pd.Series = pd.Series(name='asset_value')
         self.log = get_logger(module_name=__name__,
@@ -126,6 +128,7 @@ class Strategy:
         策略每收到一条消息的处理逻辑， 回测框架的消息目前只有 tick data 和 order callback
         '''
         self.send_order_flag = False
+        self.stop_loss_tag = False
         if msg is not None:
             if isinstance(msg, dict):  # 行情通用格式
                 msg_type = msg['messageType']
@@ -174,6 +177,7 @@ class Strategy:
         return
 
     def __cal_factors(self):
+        # TODO: Move factor calculation out from core
         factor_params = self.paramters['factor_param']
         for ContractId in self.contracts:
             # MomT
@@ -198,7 +202,10 @@ class Strategy:
         3. 有持仓时， 1) pnl < -0.003 止损平仓， 2) 持仓时间超过290s 平仓 3) 来了个反向信号平仓
         '''
         self.log.debug('In signal caculation!')
-        self._last_sig_sec = (self.current_exchtime_sec) // 10 * 10
+        n_sec = self.paramters['startegy_param']['n_seconds2signal']
+        if self.current_exchtime_sec in [36900, 41400]:
+            return
+        self._last_sig_sec = (self.current_exchtime_sec) // n_sec * n_sec # trick to keep _last_sig_sec in multiples of n sec
         target_position = {}
         for ContractId in self.contracts:
             current_holding = self.account.holdings.get(ContractId, None)
@@ -217,6 +224,10 @@ class Strategy:
                 signal = 0
             
             signal = np.sign(signal)
+
+            if self.current_exchtime_sec - self._last_stoploss_time_sec[ContractId] < 300:
+                self.log.debug('Frezeen time after stop loss less than 300s!')
+                return 
 
             if self.current_exchtime_sec > 14*3600+55*60 or self.current_exchtime_sec < 9*3600+5*60:
                 if current_holding:
@@ -238,24 +249,27 @@ class Strategy:
                 if self.current_exchtime_sec - Filled_time_sec >= self.paramters['startegy_param']['max_holding_sec']:
                     target_position[ContractId] = 0
                     self.send_order_flag = True
+                    self.stop_loss_tag = True
                 #if np.sign(current_holding.Quantity) == signal:
                 #    target_position[ContractId] = 0
                 #    self.send_order_flag = True
 
-                # if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price > 0.002:
-                #    self.log.info('Send stop profit task')
-                #    target_position[ContractId] = 0
-                #    self.send_order_flag = True
-
-                if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price < self.paramters['startegy_param']['stoploss']:
-                    self.log.info('Send stop loss task')
+                if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price > 100:
+                    self.log.info('Send stop profit task')
                     target_position[ContractId] = 0
                     self.send_order_flag = True
+                    self.stop_loss_tag = True
+
+                if np.sign(current_holding.Quantity)*(self.LastTicks[ContractId].Last - Filled_Price)/Filled_Price < self.paramters['startegy_param']['stoploss']:
+                    self.log.info('===Send stop loss task!')
+                    target_position[ContractId] = 0
+                    self.send_order_flag = True
+                    self.stop_loss_tag = True
 
         self.last_target_position = target_position
         return
 
-    def sendorder2simulator(self, target_simulator: Simulator):
+    def sendorder2simulator(self, target_simulator: Simulator, order_type: str):
         '''
         策略产生权重并发单到simulator, 同时记录已经发送但是未成交的订单。
         '''
@@ -275,10 +289,16 @@ class Strategy:
                 continue
             elif quantity > 0:
                 Direction = BUYSELLDIRECTION.BUY
-                send_price = self.LastTicks[k].Last
+                if order_type == 'aggressive': # TODO : 临时加的逻辑，写成函数
+                    send_price = self.LastTicks[k].Last
+                else:
+                    send_price = self.LastTicks[k].Ask
             else:
                 Direction = BUYSELLDIRECTION.SELL
-                send_price = self.LastTicks[k].Last
+                if order_type == 'aggressive':
+                    send_price = self.LastTicks[k].Last
+                else:
+                    send_price = self.LastTicks[k].Bid
             one_order = Order(nonce=f'test_order_{k}',
                               TimeStamp=self.current_time,
                               ContractId=k,
@@ -432,32 +452,3 @@ class Strategy:
         # raise KeyboardInterrupt
 
 
-if __name__ == '__main__':
-    dates = ['2020-07-21', '2020-07-22', '2020-07-23', '2020-07-24',
-             '2020-07-27', '2020-07-28', '2020-07-29', '2020-07-30', '2020-07-31']
-    for _date in dates:
-        date = pd.to_datetime(_date)
-        data = load_data(path.joinpath(
-            f'data/MD_with_signal_{date.strftime("%Y%m%d")}.hdf5'))
-        #contracts = [322009, 672009, 262010, 142009, 702012, 242009, 842009, 362009, 802009, 332009, 152012, 872010,
-        #             682009, 772009, 792009, 382009, 762011, 302009, 372009, 352009, 882009, 652009, 222009, 502009,
-        #             342009, 232009, 422009, 452009, 212010, 462009, 312009, 192009]
-        contracts = [192009]
-        print('Loading Strats')
-        strat = Strategy(date, contracts=contracts)
-        print('Loading Data')
-        sdg = STEAMINGDATAGENERATOR(date, contracts=contracts)
-        simulator = Simulator()
-        n = 0
-        while True:
-            msg = sdg.getNextMsg()
-            if not msg:
-                strat.exit()
-                break
-            else:
-                order_callback = simulator.on_msg(msg)
-                if order_callback:
-                    sdg.putMsg(order_callback, method='left')
-                strat.on_msg(msg)
-                if strat.send_order_flag:
-                    strat.sendorder2simulator(simulator)
