@@ -158,7 +158,7 @@ class Strategy:
             self.asset_value.loc[self.last_min_sec] = self.account.assetvalue
             self.__cal_factors()
         
-        # TODO. 信号计算的时间可以设置成参数。 和因子计算的时间不同是为了看平仓的信号。
+        # TODO. if get mindata and factors for the first day, one need comment out following 2 lines. 
         if self.current_exchtime_sec - self._last_sig_sec >= self.paramters['startegy_param']['n_seconds2signal']:
             self.cal_target_position()
 
